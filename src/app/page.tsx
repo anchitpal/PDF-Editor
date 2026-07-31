@@ -480,8 +480,17 @@ export default function Home() {
         pageState.textLayerEl.appendChild(span);
         run.el = span;
  
-        // chrome = move handle + resize handle, lives as a sibling (never nested inside
-        // the contentEditable element, so it can't be typed into or deleted by backspace)
+        // Measure natural DOM width of text and scaleX to match target PDF width
+        const naturalWidth = span.offsetWidth;
+        let scaleX = 1;
+        if(naturalWidth > 0 && !run.isNew) {
+          scaleX = run.width / naturalWidth;
+          if(scaleX < 0.1) scaleX = 0.1;
+          if(scaleX > 4.0) scaleX = 4.0;
+        }
+        run.scaleX = scaleX;
+        styleRunTransform(span, run);
+ 
         const chrome = document.createElement('div');
         chrome.className = 'run-chrome';
         const moveHandle = document.createElement('div'); moveHandle.className='handle move'; moveHandle.title='Drag to move';
@@ -494,10 +503,8 @@ export default function Home() {
         moveHandle.addEventListener('mousedown', (e: any)=>{ e.stopPropagation(); e.preventDefault(); startMoveRun(pageState, run, e); });
         resizeHandle.addEventListener('mousedown', (e: any)=>{ e.stopPropagation(); e.preventDefault(); startResizeRun(pageState, run, e); });
  
-        // mousedown-then-mouseup with negligible movement = click-to-edit.
-        // mousedown-then-drag = move the run, without entering edit mode.
         span.addEventListener('mousedown', (e: any)=>{
-          if(span.isContentEditable) return; // already editing: let native caret placement happen
+          if(span.isContentEditable) return;
           e.preventDefault();
           e.stopPropagation();
           selectRun(pageState, run);
@@ -521,7 +528,6 @@ export default function Home() {
             span.classList.remove('dragging');
             if(!dragging){ enterEditMode(pageState, run); }
             else {
-              const finalLeft=run.left, finalTop=run.top;
               pushUndo(()=>{
                 run.left=origLeft; run.top=origTop;
                 span.style.left=origLeft+'px'; span.style.top=origTop+'px';
@@ -540,7 +546,12 @@ export default function Home() {
         });
         span.addEventListener('input', ()=> { reflowLine(pageState, run); syncChrome(run); });
       }
-
+ 
+      function styleRunTransform(span: any, run: any){
+        const scaleX = run.scaleX || 1;
+        span.style.transform = `rotate(${run.angleRad || 0}rad) scaleX(${scaleX})`;
+      }
+ 
       function syncChrome(run: any){
         if(!run.chromeEl) return;
         run.chromeEl.style.left = run.left+'px';
@@ -548,7 +559,7 @@ export default function Home() {
         run.chromeEl.style.width = run.width+'px';
         run.chromeEl.style.height = (run.height||run.fontSize)+'px';
       }
-
+ 
       let selectedRun: any = null;
       function selectRun(pageState: any, run: any){
         if(selectedRun && selectedRun!==run) deselectRun(selectedRun);
@@ -617,7 +628,7 @@ export default function Home() {
         window.addEventListener('mousemove',onMove);
         window.addEventListener('mouseup',onUp);
       }
-
+ 
       function styleRun(span: any, run: any){
         span.style.left = run.left+'px';
         span.style.top = run.top+'px';
@@ -626,10 +637,9 @@ export default function Home() {
         span.style.fontFamily = run.cssFamily;
         span.style.fontWeight = run.bold ? '700':'400';
         span.style.fontStyle = run.italic ? 'italic':'normal';
-        span.style.transform = run.angleRad ? `rotate(${run.angleRad}rad)` : '';
         span.style.minWidth = run.width+'px';
       }
-
+ 
       function enterEditMode(pageState: any, run: any){
         document.querySelectorAll('.run.editing').forEach((r: any)=>{ if(r!==run.el) r.blur(); });
         selectRun(pageState, run);
@@ -637,9 +647,15 @@ export default function Home() {
         run._editSnapshot = {
           text: run.text,
           width: run.width,
+          scaleX: run.scaleX || 1,
           deleted: !!run.deleted,
           lineSnapshot: lineRuns.map((r: any)=>({run:r, left:r.left}))
         };
+        // Reset scaleX to 1 during editing to enable accurate editing caret
+        run.scaleX = 1;
+        styleRunTransform(run.el, run);
+        reflowLine(pageState, run);
+        
         run.el.contentEditable = 'true';
         run.el.classList.add('editing');
         run.el.focus();
@@ -672,22 +688,24 @@ export default function Home() {
             run.el.style.display = before.deleted ? 'none':'';
             run.width = before.width;
             run.el.style.minWidth = before.width+'px';
+            run.scaleX = before.scaleX;
+            styleRunTransform(run.el, run);
             before.lineSnapshot.forEach((s: any)=>{ s.run.left = s.left; if(s.run.el) s.run.el.style.left = s.left+'px'; syncChrome(s.run); });
             syncChrome(run);
           });
         }
         run._editSnapshot = null;
       }
-
+ 
       function reflowLine(pageState: any, changedRun: any){
         const measured = measureNaturalWidth(changedRun.el);
         const delta = measured - changedRun.width;
         if(Math.abs(delta) < 0.5) return;
-
+ 
         const lineRuns = pageState.runs
           .filter((r: any) => !r.deleted && Math.abs(r.top - changedRun.top) < Math.max(3, changedRun.height*0.3))
           .sort((a: any, b: any)=>a.left-b.left);
-
+ 
         const idx = lineRuns.indexOf(changedRun);
         changedRun.width = measured;
         if(idx===-1) return;
@@ -698,8 +716,7 @@ export default function Home() {
       }
       
       function measureNaturalWidth(elm: any){
-        const r = elm.getBoundingClientRect();
-        return r.width;
+        return elm.offsetWidth || elm.getBoundingClientRect().width;
       }
 
       /* ============================================================
@@ -761,6 +778,7 @@ export default function Home() {
 
         box.addEventListener('mousedown', (e: any)=>{
           if(e.target.classList.contains('handle')) return;
+          if(e.target.closest('.img-toolbar')) return;
           e.stopPropagation();
           selectImage(pageState, im);
           startDrag(pageState, im, e);
@@ -881,17 +899,21 @@ export default function Home() {
       
       function replaceImage(im: any){
         const input = el('imageReplaceInput');
-        input.onchange = ()=>{
-          const f = input.files[0]; if(!f) return;
+        const onChange = () => {
+          const f = input.files[0];
+          if(!f) return;
           const reader = new FileReader();
           const oldUrl = im.dataUrl;
           reader.onload = ()=>{
-            im.dataUrl = reader.result; im.el.querySelector('img').src = reader.result;
+            im.dataUrl = reader.result;
+            im.el.querySelector('img').src = reader.result;
             pushUndo(()=>{ im.dataUrl = oldUrl; im.el.querySelector('img').src = oldUrl; });
           };
           reader.readAsDataURL(f);
-          input.value='';
+          input.removeEventListener('change', onChange);
         };
+        input.value = '';
+        input.addEventListener('change', onChange);
         input.click();
       }
 
@@ -901,8 +923,9 @@ export default function Home() {
       el('btnInsertImage').onclick = ()=>{
         if(!pages.length) return;
         const input = el('imageReplaceInput');
-        input.onchange = ()=>{
-          const f = input.files[0]; if(!f) return;
+        const onChange = () => {
+          const f = input.files[0];
+          if(!f) return;
           const reader = new FileReader();
           reader.onload = ()=>{
             const pageState = pages[0];
@@ -919,8 +942,10 @@ export default function Home() {
             });
           };
           reader.readAsDataURL(f);
-          input.value='';
+          input.removeEventListener('change', onChange);
         };
+        input.value = '';
+        input.addEventListener('change', onChange);
         input.click();
       };
 
